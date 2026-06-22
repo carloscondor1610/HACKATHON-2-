@@ -6,7 +6,6 @@ import './App.css'
 
 function App() {
   const [count, setCount] = useState(0)
-#Aqui hay algo raro
   return (
     <>
       <section id="center">
