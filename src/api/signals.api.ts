@@ -1,8 +1,10 @@
 import { apiRequest } from "./http";
 import type {
   Signal,
+  SignalAttendableStatus,
   SignalsFeedQuery,
   SignalsFeedResponse,
+  UpdateSignalStatusRequest,
 } from "../types/signal.types";
 
 type QueryValue = string | number | null | undefined;
@@ -45,6 +47,20 @@ export function getSignalById(
   signal?: AbortSignal
 ): Promise<Signal> {
   return apiRequest<Signal>(`/signals/${encodeURIComponent(id)}`, {
+    signal,
+  });
+}
+
+export function updateSignalStatus(
+  id: string,
+  status: SignalAttendableStatus,
+  signal?: AbortSignal
+): Promise<Signal> {
+  const body: UpdateSignalStatusRequest = { status };
+
+  return apiRequest<Signal>(`/signals/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body,
     signal,
   });
 }

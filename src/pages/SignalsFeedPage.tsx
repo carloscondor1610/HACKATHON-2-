@@ -1,12 +1,5 @@
-import {
-  type FormEvent,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { Link, useLocation, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { HttpError } from "../api/http";
 import { getSignalsFeed } from "../api/signals.api";
 import {
@@ -19,65 +12,115 @@ import {
   type SignalType,
   type SignalsFeedQuery,
 } from "../types/signal.types";
+import {
+  applyCachedStatusToSignals,
+  readSignalsFeedSnapshot,
+  saveSignalsFeedSnapshot,
+} from "../utils/signalsCache";
+const FEED_LIMIT = 15;
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
-function isOneOf<T extends string>(
-  options: readonly T[],
-  value: string | null
-): value is T {
-  return value !== null && options.includes(value as T);
+function getHttpMessage(error: unknown, fallback: string): string {
+  if (error instanceof HttpError) {
+    return error.message;
+  }
+
+  return fallback;
 }
 
-function parseLimit(value: string | null): 15 | 30 {
-  return value === "30" ? 30 : 15;
+function isSignalType(value: string | null): value is SignalType {
+  return SIGNAL_TYPE_OPTIONS.includes(value as SignalType);
 }
 
-function dedupeSignals(previous: Signal[], incoming: Signal[]): Signal[] {
-  const ids = new Set(previous.map((signal) => signal.id));
-  return [...previous, ...incoming.filter((signal) => !ids.has(signal.id))];
+function isSignalSeverity(value: string | null): value is Severity {
+  return SEVERITY_OPTIONS.includes(value as Severity);
 }
 
-function getSeverityClass(severity: Severity): string {
-  if (severity === "CRITICO") return "border-red-400/40 bg-red-500/10 text-red-200";
-  if (severity === "GRAVE") return "border-yellow-400/40 bg-yellow-500/10 text-yellow-100";
-  if (severity === "MODERADO") return "border-purple-400/40 bg-purple-500/10 text-purple-200";
-  return "border-green-400/40 bg-green-500/10 text-green-200";
+function isSignalStatus(value: string | null): value is SignalStatus {
+  return SIGNAL_STATUS_OPTIONS.includes(value as SignalStatus);
 }
 
-function getStatusClass(status: SignalStatus): string {
-  if (status === "ATENDIDA") return "border-green-400/40 bg-green-500/10 text-green-200";
-  if (status === "PROCESANDO") return "border-yellow-400/40 bg-yellow-500/10 text-yellow-100";
+function dedupeSignals(previous: Signal[], next: Signal[]): Signal[] {
+  const byId = new Map<string, Signal>();
+
+  for (const signal of previous) {
+    byId.set(signal.id, signal);
+  }
+
+  for (const signal of next) {
+    byId.set(signal.id, signal);
+  }
+
+  return Array.from(byId.values());
+}
+
+function makeQueryKey(query: SignalsFeedQuery): string {
+  return JSON.stringify({
+    limit: query.limit,
+    signalType: query.signalType ?? "",
+    severity: query.severity ?? "",
+    status: query.status ?? "",
+    q: query.q ?? "",
+  });
+}
+
+function getSeverityClass(severity: string): string {
+  if (severity === "CRITICA" || severity === "CRITICAL") {
+    return "border-red-400/40 bg-red-500/10 text-red-100";
+  }
+
+  if (severity === "ALTA" || severity === "HIGH") {
+    return "border-orange-400/40 bg-orange-500/10 text-orange-100";
+  }
+
+  if (severity === "MEDIA" || severity === "MEDIUM") {
+    return "border-yellow-400/40 bg-yellow-500/10 text-yellow-100";
+  }
+
+  return "border-cyan-400/40 bg-cyan-500/10 text-cyan-100";
+}
+
+function getStatusClass(status: string): string {
+  if (status === "ATENDIDA") {
+    return "border-green-400/40 bg-green-500/10 text-green-200";
+  }
+
+  if (status === "PROCESANDO") {
+    return "border-yellow-400/40 bg-yellow-500/10 text-yellow-100";
+  }
+
   return "border-slate-600 bg-slate-800 text-slate-200";
-}
-
-function Badge({
-  children,
-  className,
-}: {
-  children: string;
-  className: string;
-}) {
-  return (
-    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${className}`}>
-      {children}
-    </span>
-  );
 }
 
 export function SignalsFeedPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const location = useLocation();
+
+  const signalTypeParam = searchParams.get("signalType");
+  const severityParam = searchParams.get("severity");
+  const statusParam = searchParams.get("status");
+  const qParam = searchParams.get("q") ?? "";
+
+  const query = useMemo<SignalsFeedQuery>(() => {
+    return {
+      limit: FEED_LIMIT,
+      signalType: isSignalType(signalTypeParam) ? signalTypeParam : undefined,
+      severity: isSignalSeverity(severityParam) ? severityParam : undefined,
+      status: isSignalStatus(statusParam) ? statusParam : undefined,
+      q: qParam.trim() || undefined,
+    };
+  }, [signalTypeParam, severityParam, statusParam, qParam]);
+
+  const queryKey = useMemo(() => makeQueryKey(query), [query]);
 
   const [items, setItems] = useState<Signal[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
   const [totalEstimate, setTotalEstimate] = useState(0);
 
-  const [qDraft, setQDraft] = useState(searchParams.get("q") ?? "");
-  const [isInitialLoading, setIsInitialLoading] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [initialError, setInitialError] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
@@ -87,67 +130,40 @@ export function SignalsFeedPage() {
   const inFlightRef = useRef(false);
   const versionRef = useRef(0);
 
-  const query = useMemo<SignalsFeedQuery>(() => {
-    const signalTypeParam = searchParams.get("signalType");
-    const severityParam = searchParams.get("severity");
-    const statusParam = searchParams.get("status");
+  const updateSearch = useCallback(
+    (key: string, value: string) => {
+      const nextParams = new URLSearchParams(searchParams);
 
-    const signalType: SignalType | undefined = isOneOf(SIGNAL_TYPE_OPTIONS, signalTypeParam)
-      ? signalTypeParam
-      : undefined;
+      if (value) {
+        nextParams.set(key, value);
+      } else {
+        nextParams.delete(key);
+      }
 
-    const severity: Severity | undefined = isOneOf(SEVERITY_OPTIONS, severityParam)
-      ? severityParam
-      : undefined;
-
-    const status: SignalStatus | undefined = isOneOf(SIGNAL_STATUS_OPTIONS, statusParam)
-      ? statusParam
-      : undefined;
-
-    const q = searchParams.get("q")?.trim() ?? "";
-
-    return {
-      limit: parseLimit(searchParams.get("limit")),
-      signalType,
-      severity,
-      status,
-      q: q || undefined,
-    };
-  }, [searchParams]);
-
-  useEffect(() => {
-    setQDraft(searchParams.get("q") ?? "");
-  }, [searchParams]);
-
-  function updateParam(name: string, value: string) {
-    const next = new URLSearchParams(searchParams);
-
-    if (value) {
-      next.set(name, value);
-    } else {
-      next.delete(name);
-    }
-
-    setSearchParams(next);
-  }
-
-  function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    updateParam("q", qDraft.trim().slice(0, 80));
-  }
+      setSearchParams(nextParams);
+    },
+    [searchParams, setSearchParams]
+  );
 
   const loadPage = useCallback(
-    async (cursor: string | null, mode: "initial" | "more", version: number) => {
-      if (inFlightRef.current) return;
+    async (
+      cursor: string | null,
+      mode: "initial" | "more",
+      requestVersion: number
+    ) => {
+      if (inFlightRef.current) {
+        return;
+      }
 
-      inFlightRef.current = true;
       const controller = new AbortController();
+
+      abortRef.current?.abort();
       abortRef.current = controller;
+      inFlightRef.current = true;
 
       if (mode === "initial") {
         setIsInitialLoading(true);
         setInitialError(null);
-        setPageError(null);
       } else {
         setIsLoadingMore(true);
         setPageError(null);
@@ -162,25 +178,30 @@ export function SignalsFeedPage() {
           controller.signal
         );
 
-        if (version !== versionRef.current) return;
+        if (requestVersion !== versionRef.current) {
+          return;
+        }
+
+        const nextItems = applyCachedStatusToSignals(data.items, query.status);
 
         if (mode === "initial") {
-          setItems(data.items);
+          setItems(nextItems);
         } else {
-          setItems((previous) => dedupeSignals(previous, data.items));
+          setItems((previous) => dedupeSignals(previous, nextItems));
         }
 
         setNextCursor(data.nextCursor);
         setHasMore(data.hasMore);
         setTotalEstimate(data.totalEstimate);
       } catch (caughtError: unknown) {
-        if (isAbortError(caughtError)) return;
-        if (version !== versionRef.current) return;
+        if (isAbortError(caughtError)) {
+          return;
+        }
 
-        const message =
-          caughtError instanceof HttpError
-            ? caughtError.message
-            : "No se pudo cargar el feed.";
+        const message = getHttpMessage(
+          caughtError,
+          "No se pudo cargar el feed de Senales."
+        );
 
         if (mode === "initial") {
           setInitialError(message);
@@ -188,16 +209,16 @@ export function SignalsFeedPage() {
           setPageError(message);
         }
       } finally {
-        inFlightRef.current = false;
+        if (requestVersion === versionRef.current) {
+          setIsInitialLoading(false);
+          setIsLoadingMore(false);
+        }
 
         if (abortRef.current === controller) {
           abortRef.current = null;
         }
 
-        if (version === versionRef.current) {
-          setIsInitialLoading(false);
-          setIsLoadingMore(false);
-        }
+        inFlightRef.current = false;
       }
     },
     [query]
@@ -211,41 +232,65 @@ export function SignalsFeedPage() {
     abortRef.current = null;
     inFlightRef.current = false;
 
+    const snapshot = readSignalsFeedSnapshot(queryKey);
+
+    setInitialError(null);
+    setPageError(null);
+
+    if (snapshot) {
+      setItems(applyCachedStatusToSignals(snapshot.items, query.status));
+      setNextCursor(snapshot.nextCursor);
+      setHasMore(snapshot.hasMore);
+      setTotalEstimate(snapshot.totalEstimate);
+      setIsInitialLoading(false);
+      setIsLoadingMore(false);
+
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: snapshot.scrollY });
+      });
+
+      return () => {
+        abortRef.current?.abort();
+      };
+    }
+
     setItems([]);
     setNextCursor(null);
     setHasMore(true);
     setTotalEstimate(0);
-    setInitialError(null);
-    setPageError(null);
 
     void loadPage(null, "initial", version);
 
     return () => {
       abortRef.current?.abort();
     };
-  }, [searchParams, loadPage]);
+  }, [queryKey, query.status, loadPage]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    if (!sentinel) return;
+
+    if (!sentinel) {
+      return;
+    }
 
     const observer = new IntersectionObserver(
       (entries) => {
         const firstEntry = entries[0];
 
         if (
-          firstEntry?.isIntersecting &&
+          firstEntry.isIntersecting &&
           hasMore &&
           !isInitialLoading &&
           !isLoadingMore &&
-          !pageError
+          !pageError &&
+          nextCursor
         ) {
           void loadPage(nextCursor, "more", versionRef.current);
         }
       },
       {
         root: null,
-        rootMargin: "500px",
+        rootMargin: "600px",
         threshold: 0,
       }
     );
@@ -255,233 +300,244 @@ export function SignalsFeedPage() {
     return () => {
       observer.disconnect();
     };
-  }, [hasMore, isInitialLoading, isLoadingMore, pageError, nextCursor, loadPage]);
+  }, [
+    hasMore,
+    isInitialLoading,
+    isLoadingMore,
+    pageError,
+    nextCursor,
+    loadPage,
+  ]);
 
-  function saveScrollBeforeLeaving() {
-    sessionStorage.setItem("signals-scroll-y", String(window.scrollY));
-  }
-
-  useEffect(() => {
-    const saved = sessionStorage.getItem("signals-scroll-y");
-
-    if (saved) {
-      window.requestAnimationFrame(() => {
-        window.scrollTo({ top: Number(saved) });
-      });
-    }
-  }, []);
-
-  function retryInitial() {
-    versionRef.current += 1;
-    void loadPage(null, "initial", versionRef.current);
-  }
-
-  function retryMore() {
-    void loadPage(nextCursor, "more", versionRef.current);
+  function saveFeedBeforeLeaving() {
+    saveSignalsFeedSnapshot({
+      key: queryKey,
+      items,
+      nextCursor,
+      hasMore,
+      totalEstimate,
+      scrollY: window.scrollY,
+    });
   }
 
   return (
     <div className="space-y-6">
-      <section>
+      <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
         <p className="text-sm font-semibold uppercase tracking-[0.35em] text-cyan-300">
-          Feed
+          Feed infinito
         </p>
 
-        <h1 className="mt-2 text-3xl font-bold text-white">
-          Feed infinito de Senales
-        </h1>
+        <div className="mt-3 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-white">Senales</h1>
+            <p className="mt-2 max-w-2xl text-slate-400">
+              Monitorea eventos reales emitidos por Tropeles. Los filtros se
+              guardan en la URL y la carga usa cursor real del servidor.
+            </p>
+          </div>
 
-        <p className="mt-2 text-slate-400">
-          Cursor-based, deduplicado por ID, una request en vuelo y filtros en URL.
-        </p>
+          <div className="rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-300">
+            Estimado:{" "}
+            <span className="font-bold text-white">{totalEstimate}</span>
+          </div>
+        </div>
       </section>
 
       <section className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
-        <div className="grid gap-4 md:grid-cols-5">
-          <form onSubmit={handleSearchSubmit} className="md:col-span-2">
-            <label className="text-sm text-slate-300">Busqueda</label>
-
-            <div className="mt-1 flex gap-2">
-              <input
-                value={qDraft}
-                onChange={(event) => setQDraft(event.target.value)}
-                maxLength={80}
-                placeholder="Buscar senales..."
-                className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus:border-cyan-400"
-              />
-
-              <button
-                type="submit"
-                className="rounded-lg bg-cyan-400 px-4 py-2 font-bold text-slate-950 hover:bg-cyan-300"
-              >
-                Buscar
-              </button>
-            </div>
-          </form>
-
-          <label>
-            <span className="text-sm text-slate-300">Tipo</span>
+        <div className="grid gap-3 md:grid-cols-4">
+          <label className="space-y-1">
+            <span className="text-sm font-semibold text-slate-300">Tipo</span>
             <select
               value={query.signalType ?? ""}
-              onChange={(event) => updateParam("signalType", event.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              onChange={(event) =>
+                updateSearch("signalType", event.target.value)
+              }
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-400"
             >
               <option value="">Todos</option>
-              {SIGNAL_TYPE_OPTIONS.map((type) => (
-                <option key={type} value={type}>
-                  {type}
+              {SIGNAL_TYPE_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
                 </option>
               ))}
             </select>
           </label>
 
-          <label>
-            <span className="text-sm text-slate-300">Severidad</span>
+          <label className="space-y-1">
+            <span className="text-sm font-semibold text-slate-300">
+              Severidad
+            </span>
             <select
               value={query.severity ?? ""}
-              onChange={(event) => updateParam("severity", event.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              onChange={(event) => updateSearch("severity", event.target.value)}
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-400"
             >
               <option value="">Todas</option>
-              {SEVERITY_OPTIONS.map((severity) => (
-                <option key={severity} value={severity}>
-                  {severity}
+              {SEVERITY_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
                 </option>
               ))}
             </select>
           </label>
 
-          <label>
-            <span className="text-sm text-slate-300">Estado</span>
+          <label className="space-y-1">
+            <span className="text-sm font-semibold text-slate-300">Estado</span>
             <select
               value={query.status ?? ""}
-              onChange={(event) => updateParam("status", event.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              onChange={(event) => updateSearch("status", event.target.value)}
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-400"
             >
               <option value="">Todos</option>
-              {SIGNAL_STATUS_OPTIONS.map((status) => (
-                <option key={status} value={status}>
-                  {status}
+              {SIGNAL_STATUS_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
                 </option>
               ))}
             </select>
           </label>
 
-          <label>
-            <span className="text-sm text-slate-300">Limite</span>
-            <select
-              value={String(query.limit)}
-              onChange={(event) => updateParam("limit", event.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
-            >
-              <option value="15">15</option>
-              <option value="30">30</option>
-            </select>
+          <label className="space-y-1">
+            <span className="text-sm font-semibold text-slate-300">
+              Busqueda
+            </span>
+            <input
+              value={qParam}
+              onChange={(event) => updateSearch("q", event.target.value)}
+              placeholder="Buscar..."
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none placeholder:text-slate-600 focus:border-cyan-400"
+            />
           </label>
         </div>
       </section>
 
-      <section className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3">
-        <p className="text-sm text-slate-300">
-          Estimado total: <span className="text-white">{totalEstimate}</span>
-        </p>
+      <section className="min-h-[520px] rounded-2xl border border-slate-800 bg-slate-900 p-4">
+        {isInitialLoading && (
+          <div className="space-y-3">
+            {Array.from({ length: 5 }).map((_, index) => (
+              <div
+                key={index}
+                className="h-32 animate-pulse rounded-xl border border-slate-800 bg-slate-950"
+              />
+            ))}
+          </div>
+        )}
 
-        {(isInitialLoading || isLoadingMore) && (
-          <p className="text-sm text-cyan-300">Cargando...</p>
+        {!isInitialLoading && initialError && (
+          <div className="rounded-xl border border-red-400/40 bg-red-500/10 p-6">
+            <h2 className="text-xl font-bold text-red-100">
+              Error al cargar el feed
+            </h2>
+            <p className="mt-2 text-red-200">{initialError}</p>
+            <button
+              onClick={() => void loadPage(null, "initial", versionRef.current)}
+              className="mt-4 rounded-lg bg-red-400 px-4 py-2 font-semibold text-slate-950 hover:bg-red-300"
+            >
+              Reintentar
+            </button>
+          </div>
+        )}
+
+        {!isInitialLoading && !initialError && items.length === 0 && (
+          <div className="flex min-h-[380px] items-center justify-center rounded-xl border border-dashed border-slate-700">
+            <div className="text-center">
+              <h2 className="text-xl font-bold text-white">
+                No hay Senales para estos filtros
+              </h2>
+              <p className="mt-2 text-slate-400">
+                Cambia la busqueda o limpia los filtros.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {!isInitialLoading && !initialError && items.length > 0 && (
+          <div className="space-y-3">
+            {items.map((signal) => (
+              <Link
+                key={signal.id}
+                to={`/signals/${encodeURIComponent(signal.id)}`}
+                state={{
+                  fromFeed: `/signals?${searchParams.toString()}`,
+                }}
+                onClick={saveFeedBeforeLeaving}
+                className="block rounded-xl border border-slate-800 bg-slate-950 p-4 transition hover:border-cyan-400/60 hover:bg-slate-900"
+              >
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <div className="flex flex-wrap gap-2">
+                      <span className="rounded-full border border-cyan-400/40 bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-100">
+                        {signal.signalType}
+                      </span>
+
+                      <span
+                        className={`rounded-full border px-3 py-1 text-xs font-semibold ${getSeverityClass(
+                          signal.severity
+                        )}`}
+                      >
+                        {signal.severity}
+                      </span>
+
+                      <span
+                        className={`rounded-full border px-3 py-1 text-xs font-semibold ${getStatusClass(
+                          signal.status
+                        )}`}
+                      >
+                        {signal.status}
+                      </span>
+                    </div>
+
+                    <p className="mt-3 text-lg font-semibold text-white">
+                      {signal.rawContent}
+                    </p>
+
+                    <p className="mt-2 text-sm text-slate-400">
+                      Tropel:{" "}
+                      <span className="text-slate-200">
+                        {signal.tropel.name}
+                      </span>{" "}
+                      · {signal.tropel.species}
+                    </p>
+                  </div>
+
+                  <div className="text-sm text-slate-500 md:text-right">
+                    <p>{new Date(signal.createdAt).toLocaleString()}</p>
+                    <p className="mt-1">ID: {signal.id}</p>
+                  </div>
+                </div>
+              </Link>
+            ))}
+
+            <div ref={sentinelRef} className="h-10" />
+
+            {isLoadingMore && (
+              <p className="rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-center text-slate-300">
+                Cargando mas Senales...
+              </p>
+            )}
+
+            {pageError && (
+              <div className="rounded-xl border border-red-400/40 bg-red-500/10 p-4">
+                <p className="font-semibold text-red-100">{pageError}</p>
+                <button
+                  onClick={() =>
+                    void loadPage(nextCursor, "more", versionRef.current)
+                  }
+                  className="mt-3 rounded-lg bg-red-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-red-300"
+                >
+                  Reintentar carga
+                </button>
+              </div>
+            )}
+
+            {!hasMore && (
+              <p className="rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-center text-slate-400">
+                Fin de la lista.
+              </p>
+            )}
+          </div>
         )}
       </section>
-
-      {initialError && (
-        <section className="rounded-2xl border border-red-400/40 bg-red-500/10 p-6">
-          <h2 className="text-xl font-bold text-red-100">
-            Error al cargar el feed
-          </h2>
-          <p className="mt-2 text-red-200">{initialError}</p>
-          <button
-            onClick={retryInitial}
-            className="mt-4 rounded-lg bg-red-400 px-4 py-2 font-semibold text-slate-950"
-          >
-            Reintentar
-          </button>
-        </section>
-      )}
-
-      {!initialError && items.length === 0 && !isInitialLoading && (
-        <section className="rounded-2xl border border-slate-800 bg-slate-900 p-8">
-          <h2 className="text-2xl font-bold text-white">Sin Senales</h2>
-          <p className="mt-2 text-slate-400">
-            No hay Senales que coincidan con los filtros actuales.
-          </p>
-        </section>
-      )}
-
-      <section className="space-y-4">
-        {items.map((signal) => (
-          <article
-            key={signal.id}
-            className="rounded-2xl border border-slate-800 bg-slate-900 p-5"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h2 className="text-xl font-bold text-white">
-                  {signal.signalType}
-                </h2>
-                <p className="mt-1 text-sm text-slate-400">
-                  {signal.tropel.name} · {signal.tropel.species}
-                </p>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                <Badge className={getSeverityClass(signal.severity)}>
-                  {signal.severity}
-                </Badge>
-
-                <Badge className={getStatusClass(signal.status)}>
-                  {signal.status}
-                </Badge>
-              </div>
-            </div>
-
-            <p className="mt-4 text-slate-300">{signal.rawContent}</p>
-
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400">
-              <span>{new Date(signal.createdAt).toLocaleString()}</span>
-
-              <Link
-                to={`/signals/${signal.id}`}
-                state={{ fromFeed: `/signals${location.search}` }}
-                onClick={saveScrollBeforeLeaving}
-                className="rounded-lg border border-cyan-400/40 px-3 py-2 font-semibold text-cyan-200 hover:bg-cyan-400/10"
-              >
-                Ver detalle
-              </Link>
-            </div>
-          </article>
-        ))}
-      </section>
-
-      {pageError && (
-        <section className="rounded-2xl border border-red-400/40 bg-red-500/10 p-5">
-          <p className="font-semibold text-red-100">{pageError}</p>
-          <p className="mt-1 text-sm text-red-200">
-            Las paginas anteriores se conservaron. Puedes reintentar.
-          </p>
-          <button
-            onClick={retryMore}
-            className="mt-4 rounded-lg bg-red-400 px-4 py-2 font-semibold text-slate-950"
-          >
-            Reintentar carga
-          </button>
-        </section>
-      )}
-
-      <div ref={sentinelRef} className="h-12" />
-
-      {!hasMore && items.length > 0 && (
-        <p className="pb-10 text-center text-sm text-slate-500">
-          Fin de la lista.
-        </p>
-      )}
     </div>
   );
 }

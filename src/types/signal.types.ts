@@ -16,6 +16,11 @@ export const SIGNAL_STATUS_OPTIONS = [
   "ATENDIDA",
 ] as const;
 
+export const SIGNAL_ATTENDABLE_STATUS_OPTIONS = [
+  "PROCESANDO",
+  "ATENDIDA",
+] as const;
+
 export type SignalType = (typeof SIGNAL_TYPE_OPTIONS)[number];
 export type Severity = (typeof SEVERITY_OPTIONS)[number];
 export type SignalStatus = (typeof SIGNAL_STATUS_OPTIONS)[number];
@@ -58,4 +63,17 @@ export interface SignalsFeedResponse {
   nextCursor: string | null;
   hasMore: boolean;
   totalEstimate: number;
+}
+
+export type SignalAttendableStatus =
+  (typeof SIGNAL_ATTENDABLE_STATUS_OPTIONS)[number];
+
+export interface UpdateSignalStatusRequest {
+  status: SignalAttendableStatus;
+}
+
+export interface SignalStatusCache {
+  id: string;
+  status: SignalAttendableStatus;
+  updatedAt: string;
 }
