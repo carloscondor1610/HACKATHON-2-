@@ -24,6 +24,10 @@ function buildQuery(params: Record<string, QueryValue>): string {
   return query ? `?${query}` : "";
 }
 
+function normalizeId(id: string): string {
+  return encodeURIComponent(id.trim());
+}
+
 export function getSignalsFeed(
   query: SignalsFeedQuery,
   signal?: AbortSignal
@@ -46,7 +50,7 @@ export function getSignalById(
   id: string,
   signal?: AbortSignal
 ): Promise<Signal> {
-  return apiRequest<Signal>(`/signals/${encodeURIComponent(id)}`, {
+  return apiRequest<Signal>(`/signals/${normalizeId(id)}`, {
     signal,
   });
 }
@@ -58,7 +62,7 @@ export function updateSignalStatus(
 ): Promise<Signal> {
   const body: UpdateSignalStatusRequest = { status };
 
-  return apiRequest<Signal>(`/signals/${encodeURIComponent(id)}/status`, {
+  return apiRequest<Signal>(`/signals/${normalizeId(id)}/status`, {
     method: "PATCH",
     body,
     signal,

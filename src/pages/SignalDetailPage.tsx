@@ -73,7 +73,7 @@ export function SignalDetailPage() {
     setActionSuccess(null);
     setFailedStatus(null);
 
-    getSignalById(id, controller.signal)
+    void getSignalById(id, controller.signal)
       .then((data) => {
         setSignal(data);
       })
@@ -97,7 +97,7 @@ export function SignalDetailPage() {
   }, [id]);
 
   async function handleStatusChange(nextStatus: SignalAttendableStatus) {
-    if (!id || updatingStatus) {
+    if (!id || updatingStatus || !signal) {
       return;
     }
 
